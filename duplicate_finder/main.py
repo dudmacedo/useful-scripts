@@ -2,7 +2,9 @@ import argparse
 import logging
 import json
 
+from pathlib import Path
 from utils import *
+from inventory import Inventory
 
 
 # ==================================================================
@@ -31,30 +33,37 @@ def setup_logging(log_file):
 # CLI
 # ==================================================================
 def print_params(args):
-    #print(args)
-    logger.info(f"Diretório de Saída: \"{args.path}\"")
-    if args.input_dir is None:
-        logger.info("Analisando apenas diretório de saída em busca de duplicatas")
-    else:
+    logger.info(f"********** ARGUMENTOS **********")
+    logger.info(f"Diretório de Destino: \"{args.path}\"")
+    match (args.op):
+        case "dedup":
+            logger.info(f"Operação: Detecção de arquivos duplicados na pasta de destino")
+        case "inc":
+            logger.info(f"Operação: Incorporação de arquivos da entrada na pasta de destino")
+    logger.info(f"Deletar arquivos duplicados: {'SIM' if args.delete else 'NÃO'}")
+    if args.input_dir:
         logger.info(f"Diretório de Entrada: \"{args.input_dir}\"")
+        if args.op == "dedup":
+            logger.info("'--op dedup' passado, diretório de  entrada será ignorado")
+    if args.inventory_file:
+        logger.info(f"Arquivo de inventário: {args.inventory_file}")
     logger.info(f"Algoritmo de Hash: {args.alg}")
-    logger.info(f"Extensões de arquivo a ignorar: {args.exclude}")
-    if args.move_dups is not None:
-        args.delete = False
-        logger.info(f"Diretório de quarentena: {args.move_dups}")
-    logger.info(f"Deletar arquivos duplicados: {'Sim' if args.delete else 'Não'}")
+    # logger.info(f"Extensões de arquivo a ignorar: {args.exclude}")
+    # if args.move_dups is not None:
+    #     args.delete = False
+    #     logger.info(f"Diretório de quarentena: {args.move_dups}")
+    logger.info(f"********************************")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Duplicate File Finder")
 
-    parser.add_argument("path", help="Diretório de saída dos arquivos")
+    parser.add_argument("path", help="Diretório de destino dos arquivos")
+    parser.add_argument("--op", choices=["dedup", "inc"], help="dedup = Apenas busca arquivos duplicados apenas na pasta de destino;inc = incorpora arquivos do diretório de entrada ao diretório de destino, ignorando duplicados")
+    parser.add_argument("--delete", action="store_true", help="Deleta arquivos duplicados encontrados. Se não for passado, apenas imprime os duplicados encontrados", default=False)
     parser.add_argument("-i", "--input-dir", default=None, help="Diretório de entrada dos arquivos (não informar caso queira analisar apenas o diretório de saída)")
-    parser.add_argument("--inventory-file", metavar="ARQUIVO", help="Salva e lê (quando disponível) arquivo contendo inventário na saída")
+    parser.add_argument("--inventory-file", metavar="ARQUIVO", help="Salva e lê (quando disponível) arquivo contendo inventário")
     parser.add_argument("-a", "--alg", default="md5", choices=["md5", "sha1", "sha256"])
-    parser.add_argument("--exclude", nargs="*", default=[], help="Extensões para ignorar (.tmp .mp4 ...)")
-    parser.add_argument("--delete", action="store_true", help="Deleta arquivos duplicados (será mantido o primeiro arquivo encontrado)")
-    parser.add_argument("--move-dups", metavar="PASTA", help="Move arquivos duplicados para uma pasta de quarentena (sobrepõe --delete)")
 
     args = parser.parse_args()
 
@@ -69,35 +78,43 @@ def main():
     # Lê arquivo de inventário
     inventory = None
     if args.inventory_file:
-        inventory = read_inventory(args.inventory_file)
-
-    # Lista arquivos na saída
-    logger.info(f"Escaneando pasta de saída: \"{args.path}\"")
-    list_output = scan_files(args.path, exclude_ext=[e.lower() for e in args.exclude])
-
-    # Lista arquivos na pasta de entrada
-    list_input = None
-    if args.input_dir:
-        list_input = scan_files(args.input_dir, exclude_ext=[e.lower() for e in args.exclude])
+        try:
+            inventory = Inventory(Path(args.inventory_file), pre_path=Path(args.path))
+        except ValueError as e:
+            logger.error(e)
+            quit()
     else:
-        inventory, duplicates = find_duplicates(list_output, args.path, alg=args.alg, inventory=inventory)
+        inventory = Inventory(pre_path=Path(args.path))
     
-    # Encontrar arquivos duplicados
-    inventory, duplicates = find_duplicates(list_output, args.path, alg=args.alg, inventory=inventory)
-    logger.info(f"Duplicatas encontradas: {len(duplicates)} grupos.")
-    
-    # Deleta arquivos duplicados
-    if args.delete:
-        #delete_duplicates(duplicates, inventory)
-        pass
-    
-    # Move arquivos duplicados
-    if args.move_dups:
-        # move_duplicates(duplicates)
-        pass
+    # Performa operação
+    if args.op == "dedup":
+            logger.info("Detecção de arquivos duplicados na pasta de destino")
+            file_list = scan_files(Path(args.path))
+            duplicates = find_duplicates(file_list, Path(args.path), alg=args.alg, inventory=inventory)
+            logger.info(f"Duplicatas encontradas: {len(duplicates)} grupos.")
 
+            # Deleta (ou exibe) arquivos duplicados
+            if args.delete:
+                logger.info("***** Deletar arquivos duplicados encontrados *****")
+                delete_duplicates(duplicates, Path(args.path), inventory)
+                logger.info("***************************************************")
+            else:
+                logger.info("***** Lista de arquivos duplicados encontrados *****")
+                for k in duplicates.keys():
+                    logger.info(f"Hash '{k}':")
+                    for f in duplicates[k]:
+                        logger.info(f"Arquivo: {f}")
+                logger.info("****************************************************")
+
+    elif args.op == "inc":
+            logger.info("Incorporação de arquivos da entrada na pasta de destino")
+
+    # Grava arquivo de inventário atualizado
     if args.inventory_file:
-        dump_inventory(inventory, args.inventory_file)
+        try:
+            inventory.record_file_inventory()
+        except e:
+            logger.error(f"Não foi possível gravar o arquivo de inventário: {e}")
 
 
 if __name__ == "__main__":

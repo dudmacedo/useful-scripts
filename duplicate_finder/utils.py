@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from collections import defaultdict
+from inventory import Inventory
 from pathlib import Path
 try:
     from tqdm import tqdm
@@ -41,7 +42,7 @@ def compute_hash(path, alg="md5", fast = False, chunk_size=1024*1024):
     return hash.hexdigest()
 
 
-def scan_files(path, exclude_ext=None):
+def scan_files(path:Path, exclude_ext=None):
     """
     Varre diretório e retorna lista de arquivos
 
@@ -52,10 +53,9 @@ def scan_files(path, exclude_ext=None):
     Returns:
         []: Lista de arquivos encontrados
     """
-    basedir = Path(path)
     files = []
 
-    for p in basedir.rglob("*"):
+    for p in path.rglob("*"):
         if p.is_file():
             if exclude_ext and p.suffix.lower() in exclude_ext:
                 continue
@@ -64,141 +64,52 @@ def scan_files(path, exclude_ext=None):
     return files
 
 
-def find_duplicates(files, output_dir, alg="md5", inventory=None):
+def find_duplicates(files, output_dir:Path, alg="md5", inventory:Inventory=None):
     logger.info("Iniciando busca por arquivos duplicados..")
 
-    if not inventory:
-        inventory = dict()
-
-    by_size = defaultdict(list)
-    for k in inventory.keys():
-        by_size[inventory[k]["size"]].append()
     for f in files:
-        try:
-            size = f.stat().st_size
-            fkey = str(Path(f).relative_to(Path(output_dir)))
-            inventory[fkey] = {}
-            inventory[fkey]['size'] = size
-            by_size[size].append(f)
-        except FileNotFoundError:
-            logger.warning(f"Arquivo inacessível: {f}")
+        if inventory:
+            inventory.add_item(f)
     
-    # partial_hashes = defaultdict(list)
-    # iterable = by_size.items()
-    # if USE_TQDM:
-    #     iterable = tqdm(iterable, desc="Hash parcial")
-    # for size, flist in iterable:
-    #     if len(flist) < 2:
-    #         continue
-    #     for f in flist:
-    #         try:
-    #             h = compute_hash(f, alg=alg, fast=True)
-    #             fkey = str(Path(f).relative_to(Path(output_dir)))
-    #             inventory[fkey]['hash_fast'] = h
-    #             inventory[fkey]['alg'] = alg
-    #             partial_hashes[(size, h)].append(f)
-    #         except FileNotFoundError:
-    #             logger.warning(f"Arquivo inacessível: {f}")
+    iterable = inventory.get_by_size_list()
+    if USE_TQDM:
+        iterable = tqdm(iterable, desc="Hash parcial (4096 bytes)")
+        for size, flist in iterable:
+            if len(flist) < 2:
+                continue
+            for f in flist:
+                path = output_dir / Path(f)
+                try:
+                    h = compute_hash(path, alg=alg, fast=True)
+                    inventory.update_item(path, hash_fast=h, alg=alg)
+                except FileNotFoundError:
+                    logger.warning(f"Arquivo inacessível: {f}")
 
-    # full_hashes = defaultdict(list)
-    # iterable = partial_hashes.items()
-    # if USE_TQDM:
-    #     iterable = tqdm(iterable, desc="Hash completo")
-    # for (size, ph), flist in iterable:
-    #     if len(flist) < 2:
-    #         continue
-    #     for f in flist:
-    #         try:
-    #             h = compute_hash(f, alg=alg, fast=False)
-    #             fkey = str(Path(f).relative_to(Path(output_dir)))
-    #             inventory[fkey]['hash_full'] = h
-    #             full_hashes[h].append(f)
-    #         except FileNotFoundError:
-    #             logger.warning(f"Arquivo inacessível: {f}")
+    iterable = inventory.get_by_hash_fast_list()
+    if USE_TQDM:
+        iterable = tqdm(iterable, desc="Hash completo")
+        for size, flist in iterable:
+            if len(flist) < 2:
+                continue
+            for f in flist:
+                path = output_dir / Path(f)
+                try:
+                    h= compute_hash(path, alg=alg, fast=False)
+                    inventory.update_item(path, hash_full=h, alg=alg)
+                except FileNotFoundError:
+                    logger.warning(f"Arquivo inacessível: {f}")
 
-    # duplicates = {h: flist for h, flist in full_hashes.items() if len(flist) > 1}
-    
-    return inventory, None # duplicates
+    return {h: flist for h, flist in inventory.get_by_hash_full_list() if len(flist) > 1}
 
 
-def delete_duplicates(duplicates, inventory=None):
-    for files in duplicates.values():
-        keep = files[0]
-        logger.info(f"Manter: {keep}")
-
-        for f in files[1:]:
+def delete_duplicates(duplicates, output_dir:Path, inventory:Inventory):
+    for k in duplicates.keys():
+        logger.info(f"Hash '{k}':")
+        logger.info(f"[MANTER] {duplicates[k][0]}")
+        for f in duplicates[k][1:]:
             try:
-                os.remove(f)
-                if inventory and str(f) in inventory.keys():
-                    inventory.pop(str(f))
+                os.remove(output_dir / Path(f))
+                inventory.remove_item(Path(f))
                 logger.info(f"[DEL] {f}")
-            except:
-                logger.error(f"Falha ao deletar {f}")
-
-
-##############################################################
-# Controle do arquivo de inventário
-##############################################################
-def dump_inventory(inventory, path):
-    output = []
-    for k in inventory.keys():
-        output.append({
-            "path": k,
-            "size": inventory[k]["size"],
-            "hash_fast": inventory[k]["hash_fast"] if "hash_fast" in inventory[k].keys() else None,
-            "hash_full": inventory[k]["hash_full"] if "hash_full" in inventory[k].keys() else None,
-            "alg": inventory[k]["alg"] if "alg" in inventory[k].keys() else None
-        })
-
-    dump_path = Path(path)
-    logger.info(f"Salvando arquivo de inventário em {path} ...")
-
-    # Grava CSV
-    if dump_path.suffix.lower() == ".csv":
-        with open(dump_path, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(["path", "size", "hash_fast", "hash_full", "alg"])
-            for item in output:
-                writer.writerow([item["path"], item["size"], item["hash_fast"], item["hash_full"], item["alg"]])
-
-        logger.info(f"Inventário salvo em: {dump_path}")
-
-    # Grava JSON
-    elif dump_path.suffix.lower() == ".json":
-        with open(dump_path, "w", encoding="utf-8") as jsonfile:
-            json.dump(inventory, jsonfile, indent=4, ensure_ascii=False)
-        logger.info(f"Inventário salvo em: {dump_path}")
-
-    else:
-        logger.warning("Extensão para o arquivo de inventário inválida. Use .csv ou .json")
-
-
-def read_inventory(path):
-    dump_path = Path(path)
-    inventory = dict()
-    logger.info(f"Lendo inventário gravado em {path}")
-
-    if not os.path.exists(dump_path):
-        logger.info(f"Arquivo não existe, será criado um novo arquivo")
-        return None
-
-    # Lê CSV
-    if dump_path.suffix.lower() == ".csv":
-        with open(dump_path, "r", encoding="utf-8") as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                if row[0] == "path":
-                    continue
-                inventory[row[0]] = {"size": row[1], "hash_fast": row[2], "hash_full": row[3], "alg": row[4]}
-    # Lê JSON
-    elif dump_path.suffix.lower() == ".json":
-        with open(dump_path, "r", encoding="utf-8") as jsonfile:
-            inventory = json.load(jsonfile)
-
-
-    else:
-        logger.warning("Extensão para o arquivo de inventário inválida. Use .csv ou .json")
-        return None
-
-    logger.info(f"Inventário recuperado. {len(inventory.keys())} registros encontrados.")
-    return inventory
+            except Exception as e:
+                logger.error(f"Falha ao deletar {f} - {e}")
